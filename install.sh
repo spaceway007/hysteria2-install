@@ -39,7 +39,8 @@ if [[ -z $(docker ps -a -q -f "name=^h-ui$") ]]; then
     echo_content skyBlue "---> H UI container not found, proceeding with fresh installation."
 else
     echo_content skyBlue "---> H UI container detected, checking for updates."
-    latest_version=$(curl -Ls "https://api.github.com/repos/jonssonyan/h-ui/releases/latest" | grep -oP '"tag_name": "\K[^"]+')
+    # Removed /latest as it was causing issues with some curl versions/apis
+    latest_version=$(curl -Ls "https://api.github.com/repos/jonssonyan/h-ui/releases" | grep -oP '"tag_name": "\K[^"]+' | head -n 1)
     current_version=$(docker exec h-ui ./h-ui -v 2>/dev/null | sed -n 's/.*version \([^\ ]*\).*/\1/p')
 
     if [[ "${latest_version}" == "${current_version}" ]]; then
@@ -65,9 +66,9 @@ echo_content green "Time Zone set to: ${h_ui_timezone}"
 # --- Network Interface Detection (Crucial Fix for venet0) ---
 echo_content green "---> Detecting network interface for nftables configuration..."
 
-# This line is the key fix for venet0
-# It looks for interfaces starting with 'en', 'eth', or 'venet'
-network_interface=$(ls /sys/class/net | grep -E '^en|^eth|^venet' | head -n 1)
+# This line is the key fix for venet0. It looks for interfaces starting with 'en', 'eth', or 'venet'.
+# It also ensures we get the first active interface.
+network_interface=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^en|^eth|^venet' | head -n 1)
 
 if [[ -z "${network_interface}" ]]; then
     echo_content red "Error: No suitable network interface detected (checked for 'en', 'eth', 'venet')."
@@ -98,28 +99,39 @@ fi
 # Ensure nftables service is running and enabled
 sudo systemctl enable nftables --now 2>/dev/null || echo_content yellow "Could not enable nftables service, please check manually."
 
-# Define the nftables chain name from the error log
+# Define the nftables chain name
 NFT_CHAIN_NAME="hui_porthopping"
 
-# Check if the chain already exists to avoid errors on re-run
-if ! sudo nft list chain inet ${NFT_CHAIN_NAME} prerouting &> /dev/null; then
-    echo_content skyBlue "Adding nftables chain: ${NFT_CHAIN_NAME}"
-    sudo nft add chain inet ${NFT_CHAIN_NAME} prerouting { type nat hook prerouting priority dstnat\; policy accept\; }
-    if [[ $? -ne 0 ]]; then
-        echo_content red "Error: Failed to add nftables chain '${NFT_CHAIN_NAME}'. Please check nftables configuration manually."
-        exit 1
-    else
-        echo_content green "Successfully added nftables chain."
-    fi
+# --- Fix for 'No such file or directory' when adding nftables chain ---
+# The previous error was due to trying to add a 'nat' type chain to an 'inet' table.
+# 'nat' chains with 'prerouting' hook belong in 'ip' or 'ip6' tables.
+echo_content skyBlue "Attempting to add nftables chain: ${NFT_CHAIN_NAME} to 'ip' table..."
+
+# Flush existing hui_porthopping chain if it exists to prevent conflicts
+sudo nft delete chain ip "${NFT_CHAIN_NAME}" prerouting 2>/dev/null
+sudo nft delete chain ip6 "${NFT_CHAIN_NAME}" prerouting 2>/dev/null
+
+# Add the chain to the 'ip' table for IPv4 NAT
+sudo nft add chain ip "${NFT_CHAIN_NAME}" prerouting "{ type nat hook prerouting priority dstnat; policy accept; }"
+
+if [[ $? -ne 0 ]]; then
+    echo_content red "Error: Failed to add nftables chain '${NFT_CHAIN_NAME}' to 'ip' table."
+    echo_content red "This might indicate a kernel limitation on your VPS, especially in OpenVZ environments, or an nftables issue."
+    echo_content red "Please check your VPS provider's support for NAT rules with nftables/iptables."
+    exit 1
 else
-    echo_content skyBlue "nftables chain '${NFT_CHAIN_NAME}' already exists. Skipping creation."
+    echo_content green "Successfully added nftables chain '${NFT_CHAIN_NAME}' to 'ip' table."
 fi
 
-# You might need to add rules to jump to this chain or specific port forwarding if h-ui requires it.
-# The original error was just chain creation, so we focus on that.
-# If h-ui actually needs rules that use $network_interface, they would come here.
-# Example (hypothetical):
-# sudo nft add rule inet ${NFT_CHAIN_NAME} prerouting iifname ${network_interface} tcp dport 8081 counter jump hui_rules
+# Additional check for IPv6 nat chain if needed (optional, uncomment if your Hysteria2 needs IPv6 nat)
+# echo_content skyBlue "Attempting to add nftables chain: ${NFT_CHAIN_NAME} to 'ip6' table..."
+# sudo nft add chain ip6 "${NFT_CHAIN_NAME}" prerouting "{ type nat hook prerouting priority dstnat; policy accept; }"
+# if [[ $? -ne 0 ]]; then
+#     echo_content yellow "Warning: Failed to add nftables chain '${NFT_CHAIN_NAME}' to 'ip6' table. IPv6 NAT might be limited."
+# else
+#     echo_content green "Successfully added nftables chain '${NFT_CHAIN_NAME}' to 'ip6' table."
+# fi
+
 
 echo_content green "---> Deploying H UI Docker container..."
 
