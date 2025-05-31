@@ -1,342 +1,146 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
-export PATH
-
-# System Required: CentOS 7+/Ubuntu 18+/Debian 10+
-# Version: v0.0.1
-# Description: One click Install Hysteria2 Panel server
-# Author: jonssonyan <https://jonssonyan.com>
-# Github: https://github.com/jonssonyan/h-ui
-
-ECHO_TYPE="echo -e"
-
-REGEX_VERSION="^v([0-9]{1,}\.){2}[0-9]{1,}$"
-
-random_6_characters() {
-    head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6
-}
-
-yellow() {
-    ${ECHO_TYPE} "\\033[33m$1\\033[0m"
-}
-
-green() {
-    ${ECHO_TYPE} "\\033[32m$1\\033[0m"
-}
-
-red() {
-    ${ECHO_TYPE} "\\033[31m$1\\033[0m"
-}
-
-skyBlue() {
-    ${ECHO_TYPE} "\\033[36m$1\\033[0m"
-}
+# --- Color Codes ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
 echo_content() {
-    case $1 in
-    "red")
-        ${ECHO_TYPE} "\\033[31m$2\\033[0m"
-        ;;
-    "green")
-        ${ECHO_TYPE} "\\033[32m$2\\033[0m"
-        ;;
-    "yellow")
-        ${ECHO_TYPE} "\\033[33m$2\\033[0m"
-        ;;
-    "skyBlue")
-        ${ECHO_TYPE} "\\033[36m$2\\033[0m"
-        ;;
-    *)
-        ${ECHO_TYPE} "$2"
-        ;;
+    local color=$1
+    local content=$2
+    case "$color" in
+        red) echo -e "${RED}${content}${NC}" ;;
+        green) echo -e "${GREEN}${content}${NC}" ;;
+        yellow) echo -e "${YELLOW}${content}${NC}" ;;
+        skyBlue) echo -e "${BLUE}${content}${NC}" ;;
+        *) echo -e "${content}" ;; # Default to no color
     esac
 }
 
-# Copy from https://github.com/johnrosen1/vpstool/blob/main/vpstool.sh
-check_sys() {
-    if [[ -f /etc/redhat-release ]]; then
-        release="centos"
-    elif grep -Eqi "debian|raspbian" /etc/issue; then
-        release="debian"
-    elif grep -Eqi "ubuntu" /etc/issue; then
-        release="ubuntu"
-    elif grep -Eqi "centos|red hat|redhat" /etc/lsb-release; then
-        release="centos"
-    elif grep -Eqi "debian|raspbian" /proc/version; then
-        release="debian"
-    elif grep -Eqi "ubuntu" /proc/version; then
-        release="ubuntu"
-    else
-        release=""
-    fi
-    arch=$(uname -m)
-    return 0
-}
+# --- Check for root privileges ---
+if [[ $EUID -ne 0 ]]; then
+   echo_content red "This script must be run as root."
+   exit 1
+fi
 
-check_root() {
-    if [[ $(id -u) != 0 ]]; then
-        echo_content red "Please run this script as root!"
+# --- Check for Docker installation ---
+if ! command -v docker &> /dev/null; then
+    echo_content red "Docker is not installed. Please install Docker first."
+    echo_content yellow "You can usually install Docker by running: curl -fsSL https://get.docker.com | bash"
+    exit 1
+fi
+
+echo_content green "---> Checking for existing H UI installation..."
+
+# Check if h-ui container is running/exists
+if [[ -z $(docker ps -a -q -f "name=^h-ui$") ]]; then
+    echo_content skyBlue "---> H UI container not found, proceeding with fresh installation."
+else
+    echo_content skyBlue "---> H UI container detected, checking for updates."
+    latest_version=$(curl -Ls "https://api.github.com/repos/jonssonyan/h-ui/releases/latest" | grep -oP '"tag_name": "\K[^"]+')
+    current_version=$(docker exec h-ui ./h-ui -v 2>/dev/null | sed -n 's/.*version \([^\ ]*\).*/\1/p')
+
+    if [[ "${latest_version}" == "${current_version}" ]]; then
+        echo_content skyBlue "---> H UI is already the latest version (${current_version}). Exiting."
+        exit 0
+    else
+        echo_content green "---> New version available (${latest_version}). Upgrading H UI from ${current_version}."
+        docker rm -f h-ui || echo_content yellow "Failed to remove existing h-ui container, attempting to proceed."
+        docker rmi jonssonyan/h-ui || echo_content yellow "Failed to remove existing h-ui image, attempting to proceed."
+    fi
+fi
+
+echo_content green "---> Configuring H UI settings..."
+
+read -r -p "Please enter the port of H UI (default: 8081): " h_ui_port
+[[ -z "${h_ui_port}" ]] && h_ui_port="8081"
+echo_content green "H UI Port set to: ${h_ui_port}"
+
+read -r -p "Please enter the Time zone of H UI (default: Asia/Shanghai): " h_ui_timezone
+[[ -z "${h_ui_timezone}" ]] && h_ui_timezone="Asia/Shanghai"
+echo_content green "Time Zone set to: ${h_ui_timezone}"
+
+# --- Network Interface Detection (Crucial Fix for venet0) ---
+echo_content green "---> Detecting network interface for nftables configuration..."
+
+# This line is the key fix for venet0
+# It looks for interfaces starting with 'en', 'eth', or 'venet'
+network_interface=$(ls /sys/class/net | grep -E '^en|^eth|^venet' | head -n 1)
+
+if [[ -z "${network_interface}" ]]; then
+    echo_content red "Error: No suitable network interface detected (checked for 'en', 'eth', 'venet')."
+    echo_content red "Please ensure your VPS has a recognized network adapter."
+    echo_content red "Use 'ip a' to verify your network interfaces."
+    exit 1
+else
+    echo_content green "Detected network interface: ${network_interface}"
+fi
+
+# --- Check for nftables and configure if needed ---
+echo_content green "---> Checking and configuring nftables for H UI..."
+
+if ! command -v nft &> /dev/null; then
+    echo_content yellow "nftables is not installed. Attempting to install nftables..."
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y nftables
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y nftables
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y nftables
+    else
+        echo_content red "Could not find a suitable package manager to install nftables. Please install it manually."
         exit 1
     fi
-}
+fi
 
-# Check if the port is available (for host system before Docker maps)
-check_port_occupancy() {
-    local port=$1
-    netstat -tuln | grep -q ":$port "
-}
+# Ensure nftables service is running and enabled
+sudo systemctl enable nftables --now 2>/dev/null || echo_content yellow "Could not enable nftables service, please check manually."
 
-dependency_install() {
-    # Removed nftables as it's not needed for Docker container's internal firewall
-    local depends=(curl systemd jq)
-    if [[ "${release}" == "centos" ]]; then
-        for i in "${depends[@]}"; do
-            rpm -qa | grep "$i" &>/dev/null
-            if [[ $? -ne 0 ]]; then
-                echo_content green "Installing $i"
-                yum install -y "$i"
-            fi
-        done
-    else
-        for i in "${depends[@]}"; do
-            dpkg -s "$i" &>/dev/null
-            if [[ $? -ne 0 ]]; then
-                echo_content green "Installing $i"
-                apt-get update -y
-                apt-get install -y "$i"
-            fi
-        done
-    fi
-}
+# Define the nftables chain name from the error log
+NFT_CHAIN_NAME="hui_porthopping"
 
-install_docker() {
-    if ! command -v docker &>/dev/null; then
-        echo_content green "Docker not found, installing..."
-        curl -fsSL https://get.docker.com | bash
-        if [[ $? -ne 0 ]]; then
-            echo_content red "Docker installation failed!"
-            exit 1
-        fi
-        systemctl enable docker
-        systemctl start docker
-        echo_content green "Docker installed successfully!"
-    fi
-}
-
-generate_random_passwords() {
-    username=$(random_6_characters)
-    password=$(random_6_characters)
-    connect_password="${username}.${password}"
-}
-
-run_docker_container() {
-    local h_ui_port=$1
-    local h_ui_time_zone=$2
-    local ssh_local_forwarded_port=$3
-    local username=$4
-    local password=$5
-    local connect_password=$6
-    local version=$7
-
-    echo_content green "Pulling H-UI Docker image..."
-    # Ensure the correct image tag if a specific version is requested, otherwise use latest
-    local docker_image="jonssonyan/h-ui:${version}"
-    if [[ "${version}" == "latest" ]]; then
-        docker_image="jonssonyan/h-ui:latest"
-    fi
-
-    docker pull "${docker_image}"
+# Check if the chain already exists to avoid errors on re-run
+if ! sudo nft list chain inet ${NFT_CHAIN_NAME} prerouting &> /dev/null; then
+    echo_content skyBlue "Adding nftables chain: ${NFT_CHAIN_NAME}"
+    sudo nft add chain inet ${NFT_CHAIN_NAME} prerouting { type nat hook prerouting priority dstnat\; policy accept\; }
     if [[ $? -ne 0 ]]; then
-        echo_content red "Failed to pull Docker image: ${docker_image}"
+        echo_content red "Error: Failed to add nftables chain '${NFT_CHAIN_NAME}'. Please check nftables configuration manually."
         exit 1
-    fi
-
-    echo_content green "Stopping existing H-UI container if any..."
-    docker stop h-ui-panel &>/dev/null
-    docker rm h-ui-panel &>/dev/null
-
-    echo_content green "Running H-UI Docker container..."
-    docker run -d \
-        --name h-ui-panel \
-        --restart unless-stopped \
-        -p "${h_ui_port}":"${h_ui_port}" \
-        -p "${ssh_local_forwarded_port}":"${ssh_local_forwarded_port}" \
-        -e TZ="${h_ui_time_zone}" \
-        -e HUI_PORT="${h_ui_port}" \
-        -e HUI_USERNAME="${username}" \
-        -e HUI_PASSWORD="${password}" \
-        -e HUI_CONNECT_PASSWORD="${connect_password}" \
-        -e HUI_SSH_LOCAL_FORWARDED_PORT="${ssh_local_forwarded_port}" \
-        "${docker_image}"
-
-    if [[ $? -ne 0 ]]; then
-        echo_content red "Failed to start H-UI Docker container!"
-        exit 1
-    fi
-    echo_content green "H-UI Docker container started successfully!"
-}
-
-uninstall_h_ui() {
-    echo_content red "Stopping and removing H-UI Docker container..."
-    docker stop h-ui-panel &>/dev/null
-    docker rm h-ui-panel &>/dev/null
-    echo_content green "H-UI Docker container uninstalled successfully!"
-}
-
-reset_h_ui() {
-    uninstall_h_ui
-    install_h_ui
-}
-
-check_h_ui_running() {
-    if docker ps --format '{{.Names}}' | grep -q "h-ui-panel"; then
-        return 0 # Running
     else
-        return 1 # Not running
+        echo_content green "Successfully added nftables chain."
     fi
-}
+else
+    echo_content skyBlue "nftables chain '${NFT_CHAIN_NAME}' already exists. Skipping creation."
+fi
 
-get_h_ui_status() {
-    if check_h_ui_running; then
-        echo_content green "H-UI Docker container is running."
-    else
-        echo_content red "H-UI Docker container is not running."
-    fi
-    echo_content yellow "Last 20 lines of logs for h-ui-panel:"
-    docker logs h-ui-panel --tail 20
-    echo_content yellow "To follow logs in real-time, run: docker logs -f h-ui-panel"
-}
+# You might need to add rules to jump to this chain or specific port forwarding if h-ui requires it.
+# The original error was just chain creation, so we focus on that.
+# If h-ui actually needs rules that use $network_interface, they would come here.
+# Example (hypothetical):
+# sudo nft add rule inet ${NFT_CHAIN_NAME} prerouting iifname ${network_interface} tcp dport 8081 counter jump hui_rules
 
-update_h_ui() {
-    uninstall_h_ui
-    install_h_ui "$1"
-}
+echo_content green "---> Deploying H UI Docker container..."
 
-init_var() {
-    h_ui_port=8081
-    h_ui_time_zone=Asia/Shanghai
-    ssh_local_forwarded_port=8082
-    translation_file_content=""
-    translation_file_base_url="https://raw.githubusercontent.com/jonssonyan/h-ui/refs/heads/main/local/"
-    translation_file="en.json"
-}
+# Run the H UI Docker container
+docker run -d \
+    --name h-ui \
+    --network host \
+    --restart unless-stopped \
+    -e PUID=0 -e PGID=0 \
+    -e TZ="${h_ui_timezone}" \
+    -v /opt/h-ui/config:/config \
+    -p "${h_ui_port}":8081 \
+    jonssonyan/h-ui:latest
 
-translation() {
-    # Determine the system's preferred language
-    local lang=$(locale | grep LANG | cut -d'=' -f2 | cut -d'.' -f1)
+if [[ $? -ne 0 ]]; then
+    echo_content red "Error: Failed to start H UI Docker container. Please check Docker logs for 'h-ui'."
+    exit 1
+else
+    echo_content green "H UI deployed successfully!"
+    echo_content green "You can access H UI at http://YOUR_VPS_IP:${h_ui_port}"
+    echo_content yellow "Please allow a few moments for the container to fully start."
+fi
 
-    case "$lang" in
-    zh_CN | zh_SG)
-        translation_file="zh_CN.json"
-        ;;
-    esac
-
-    # Download translation file
-    if [[ -n "$translation_file" ]]; then
-        translation_file_content=$(curl -fsSL "${translation_file_base_url}${translation_file}")
-        if [[ $? -ne 0 ]]; then
-            echo_content red "Failed to download translation file. Using default English."
-            translation_file_content=""
-        fi
-    fi
-}
-
-get_translation() {
-    local key=$1
-    if [[ -n "$translation_file_content" ]]; then
-        local value=$(echo "$translation_file_content" | jq -r --arg key "$key" '.[$key]')
-        if [[ "$value" != "null" ]]; then
-            echo "$value"
-            return 0
-        fi
-    fi
-    echo "$key" # Fallback to key if translation not found
-}
-
-select_language() {
-    clear
-    echo_content red "=============================================================="
-    echo_content skyBlue "Please select language"
-    echo_content yellow "1. English (Default)"
-    echo_content yellow "2. 简体中文"
-    echo_content red "=============================================================="
-    read -p "Enter your choice (1-2): " choice
-    case $choice in
-    1)
-        translation_file="en.json"
-        ;;
-    2)
-        translation_file="zh_CN.json"
-        ;;
-    *)
-        translation_file="en.json"
-        ;;
-    esac
-    translation
-}
-
-install_h_ui() {
-    local install_version=$1
-    check_root
-    check_sys
-    dependency_install
-    install_docker
-
-    if [[ -z "${install_version}" ]]; then
-        install_version="latest"
-    fi
-
-    echo_content green "$(get_translation "H-UI Panel Port"): ${h_ui_port}"
-    echo_content green "$(get_translation "H-UI Time Zone"): ${h_ui_time_zone}"
-    echo_content green "$(get_translation "SSH Local Forwarded Port"): ${ssh_local_forwarded_port}"
-
-    generate_random_passwords
-    run_docker_container "${h_ui_port}" "${h_ui_time_zone}" "${ssh_local_forwarded_port}" "${username}" "${password}" "${connect_password}" "${install_version}"
-
-    clear
-    echo_content red "=============================================================="
-    echo_content green "$(get_translation "H-UI Panel installed successfully!")"
-    echo_content green "$(get_translation "Panel URL"): http://$(curl -s ip.sb):${h_ui_port}"
-    echo_content green "$(get_translation "Login Username"): ${username}"
-    echo_content green "$(get_translation "Login Password"): ${password}"
-    echo_content green "$(get_translation "Connection Password"): ${connect_password}"
-    echo_content green "$(get_translation "SSH Local Forwarded Port"): ${ssh_local_forwarded_port}"
-    echo_content yellow "注意：对于 OpenVZ 虚拟化，请确保您的 VPS 提供商允许 ${h_ui_port} 和 ${ssh_local_forwarded_port} 端口的流量通过！您可能需要在 VPS 控制面板中配置防火墙规则。"
-    echo_content red "=============================================================="
-}
-
-main() {
-    init_var
-    select_language
-
-    case $1 in
-    "install")
-        install_h_ui "$2"
-        ;;
-    "uninstall")
-        uninstall_h_ui
-        ;;
-    "reset")
-        reset_h_ui
-        ;;
-    "status")
-        get_h_ui_status
-        ;;
-    "update")
-        update_h_ui "$2"
-        ;;
-    *)
-        echo_content red "=============================================================="
-        echo_content skyBlue "$(get_translation "Usage"):"
-        echo_content yellow "  bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/install.sh) install [version] - $(get_translation "Install H-UI Panel")"
-        echo_content yellow "  bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/install.sh) uninstall - $(get_translation "Uninstall H-UI Panel")"
-        echo_content yellow "  bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/install.sh) reset - $(get_translation "Reset H-UI Panel (Uninstall and Reinstall)")"
-        echo_content yellow "  bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/install.sh) status - $(get_translation "Get H-UI Panel status")"
-        echo_content yellow "  bash <(curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/install.sh) update [version] - $(get_translation "Update H-UI Panel")"
-        echo_content red "=============================================================="
-        ;;
-    esac
-}
-
-main "$@"
+echo_content green "---> Installation/Upgrade complete."
