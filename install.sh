@@ -11,8 +11,8 @@ else
     exit 1 
 fi
 
-# 获取第一个非 lo 的网卡
-NET_IFACE=$(ls /sys/class/net | grep -v lo | head -n 1)
+# 获取第一个有效的网卡（排除 lo 和 docker）
+NET_IFACE=$(ls /sys/class/net | grep -Ev '^(lo|docker0)$' | head -n 1)
 if [ -z "$NET_IFACE" ]; then
     echo "未能找到有效的网络接口"
     exit 1
@@ -39,20 +39,20 @@ if ! nft list table inet hui_porthopping &>/dev/null; then
     }
 fi
 
-# 检查并添加 NAT hook
+# 创建 NAT hook（如果支持）
 if grep -q nat /proc/net/ip_tables_names || modprobe nf_nat &>/dev/null; then
-    echo "已启用 NAT，检查 prerouting 规则..."
-
+    echo "检查 NAT 支持，尝试添加 prerouting 链..."
     if ! nft list chain inet hui_porthopping prerouting &>/dev/null; then
-        nft add chain inet hui_porthopping prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' || {
-            echo "创建 nft prerouting 失败"
-            exit 1
-        }
+        if ! nft add chain inet hui_porthopping prerouting '{ type nat hook prerouting priority dstnat; policy accept; }'; then
+            echo "⚠️ 警告：无法创建 NAT prerouting hook，可能当前环境不支持（容器或内核不兼容），跳过该步骤"
+        else
+            echo "✅ 已成功添加 NAT prerouting hook"
+        fi
     else
         echo "nftables prerouting 规则已存在"
     fi
 else
-    echo "未找到 NAT 支持，跳过 prerouting 配置"
+    echo "系统未启用 NAT，跳过 NAT hook 创建"
 fi
 
 # 下载并安装 Hysteria2
@@ -63,7 +63,7 @@ echo "正在下载安装 Hysteria2..."
 curl -L "$HYSTERIA_URL" -o "$INSTALL_DIR/hysteria"
 chmod +x "$INSTALL_DIR/hysteria"
 
-# 创建配置目录和文件
+# 创建配置目录和默认配置
 mkdir -p /etc/hysteria
 
 cat > /etc/hysteria/config.yaml <<CONFIG
@@ -103,5 +103,7 @@ systemctl daemon-reload
 systemctl enable hysteria
 systemctl start hysteria
 
-echo "Hysteria2 安装完成！"
-echo "配置文件位于 /etc/hysteria/config.yaml"
+echo ""
+echo "🎉 Hysteria2 安装完成！"
+echo "👉 配置文件位于：/etc/hysteria/config.yaml"
+echo "👉 服务名称：hysteria"
