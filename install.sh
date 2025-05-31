@@ -17,7 +17,7 @@ echo_content() {
         yellow) echo -e "${YELLOW}${content}${NC}" ;;
         skyBlue) echo -e "${BLUE}${content}${NC}" ;;
         *) echo -e "${content}" ;; # Default to no color
-    esac
+    esal
 }
 
 # Function to check for root privileges
@@ -37,14 +37,14 @@ check_docker() {
     fi
 }
 
-# Function to get user input for H UI port - MODIFIED DEFAULT TO 80
+# Function to get user input for H UI port - MODIFIED DEFAULT TO 8080
 get_h_ui_port() {
-    read -r -p "Please enter the port for H UI (default: 80): " h_ui_port_input
-    [[ -z "${h_ui_port_input}" ]] && h_ui_port="80" || h_ui_port="${h_ui_port_input}"
+    read -r -p "Please enter the port for H UI (default: 8080): " h_ui_port_input
+    [[ -z "${h_ui_port_input}" ]] && h_ui_port="8080" || h_ui_port="${h_ui_port_input}"
     # Basic port validation
     if ! [[ "${h_ui_port}" =~ ^[0-9]+$ ]] || (( h_ui_port < 1 )) || (( h_ui_port > 65535 )); then
-        echo_content red "Invalid port number: ${h_ui_port}. Using default port 80."
-        h_ui_port="80"
+        echo_content red "Invalid port number: ${h_ui_port}. Using default port 8080."
+        h_ui_port="8080"
     fi
     echo_content green "H UI Port set to: ${h_ui_port}"
 }
@@ -98,7 +98,7 @@ install_or_upgrade_h_ui() {
     fi
 
     echo_content green "---> Configuring H UI settings..."
-    get_h_ui_port # Call function to get port (now defaults to 80)
+    get_h_ui_port # Call function to get port (now defaults to 8080)
     get_h_ui_timezone
 
     # --- Network Interface Detection (For informational purposes, nftables part is removed) ---
