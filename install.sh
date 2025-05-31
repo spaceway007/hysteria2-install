@@ -63,74 +63,23 @@ read -r -p "Please enter the Time zone of H UI (default: Asia/Shanghai): " h_ui_
 [[ -z "${h_ui_timezone}" ]] && h_ui_timezone="Asia/Shanghai"
 echo_content green "Time Zone set to: ${h_ui_timezone}"
 
-# --- Network Interface Detection (Crucial Fix for venet0) ---
-echo_content green "---> Detecting network interface for nftables configuration..."
+# --- Network Interface Detection (Still present for general info, but nftables part is removed) ---
+echo_content green "---> Detecting network interface (for informational purposes)..."
 
-# This line is the key fix for venet0. It looks for interfaces starting with 'en', 'eth', or 'venet'.
-# It also ensures we get the first active interface.
+# This line uses 'ip' to robustly detect network interfaces like 'en', 'eth', or 'venet'.
 network_interface=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^en|^eth|^venet' | head -n 1)
 
 if [[ -z "${network_interface}" ]]; then
-    echo_content red "Error: No suitable network interface detected (checked for 'en', 'eth', 'venet')."
-    echo_content red "Please ensure your VPS has a recognized network adapter."
-    echo_content red "Use 'ip a' to verify your network interfaces."
-    exit 1
+    echo_content yellow "Warning: No common network interface detected (checked for 'en', 'eth', 'venet')."
+    echo_content yellow "H UI might still work if your network is configured differently, but please verify with 'ip a'."
 else
     echo_content green "Detected network interface: ${network_interface}"
 fi
 
-# --- Check for nftables and configure if needed ---
-echo_content green "---> Checking and configuring nftables for H UI..."
-
-if ! command -v nft &> /dev/null; then
-    echo_content yellow "nftables is not installed. Attempting to install nftables..."
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get update && sudo apt-get install -y nftables
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y nftables
-    elif command -v dnf &> /dev/null; then
-        sudo dnf install -y nftables
-    else
-        echo_content red "Could not find a suitable package manager to install nftables. Please install it manually."
-        exit 1
-    fi
-fi
-
-# Ensure nftables service is running and enabled
-sudo systemctl enable nftables --now 2>/dev/null || echo_content yellow "Could not enable nftables service, please check manually."
-
-# Define the nftables chain name
-NFT_CHAIN_NAME="hui_porthopping"
-
-# --- Fix for 'No such file or directory' when adding nftables chain ---
-# The previous error was due to trying to add a 'nat' type chain to an 'inet' table.
-# 'nat' chains with 'prerouting' hook belong in 'ip' or 'ip6' tables.
-echo_content skyBlue "Attempting to add nftables chain: ${NFT_CHAIN_NAME} to 'ip' table..."
-
-# Flush existing hui_porthopping chain if it exists to prevent conflicts
-sudo nft delete chain ip "${NFT_CHAIN_NAME}" prerouting 2>/dev/null
-sudo nft delete chain ip6 "${NFT_CHAIN_NAME}" prerouting 2>/dev/null
-
-# Add the chain to the 'ip' table for IPv4 NAT
-sudo nft add chain ip "${NFT_CHAIN_NAME}" prerouting "{ type nat hook prerouting priority dstnat; policy accept; }"
-
-if [[ $? -ne 0 ]]; then
-    echo_content red "Error: Failed to add nftables chain '${NFT_CHAIN_NAME}' to 'ip' table."
-    echo_content red "This might indicate a kernel limitation on your VPS, especially in OpenVZ environments, or an nftables issue."
-    echo_content red "Please check your VPS provider's support for NAT rules with nftables/iptables."
-    exit 1
-else
-    echo_content green "Successfully added nftables chain '${NFT_CHAIN_NAME}' to 'ip' table."
-fi
-
-# Additional check for IPv6 nat chain if needed (optional, uncomment if your Hysteria2 needs IPv6 nat)
-# echo_content skyBlue "Attempting to add nftables chain: ${NFT_CHAIN_NAME} to 'ip6' table..."
-# sudo nft add chain ip6 "${NFT_CHAIN_NAME}" prerouting "{ type nat hook prerouting priority dstnat; policy accept; }"
-# if [[ $? -ne 0 ]]; then
-#     echo_content yellow "Warning: Failed to add nftables chain '${NFT_CHAIN_NAME}' to 'ip6' table. IPv6 NAT might be limited."
-# else
-#     echo_content green "Successfully added nftables chain '${NFT_CHAIN_NAME}' to 'ip6' table."
-# fi
+# --- nftables configuration section has been removed to bypass OpenVZ kernel limitations ---
+echo_content yellow "---> Skipping nftables configuration due to potential OpenVZ kernel limitations."
+echo_content yellow "If H UI's advanced features (e.g., port hopping) require specific nftables rules, they might not work."
+echo_content yellow "Your existing Hysteria instance should still function."
 
 
 echo_content green "---> Deploying H UI Docker container..."
@@ -147,7 +96,7 @@ docker run -d \
     jonssonyan/h-ui:latest
 
 if [[ $? -ne 0 ]]; then
-    echo_content red "Error: Failed to start H UI Docker container. Please check Docker logs for 'h-ui'."
+    echo_content red "Error: Failed to start H UI Docker container. Please check Docker logs for 'h-ui' using 'docker logs h-ui'."
     exit 1
 else
     echo_content green "H UI deployed successfully!"
